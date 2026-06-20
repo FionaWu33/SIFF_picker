@@ -5,6 +5,24 @@ from dataclasses import dataclass
 from .models import Screening
 
 
+CONTENT_SIFF_OFFICIAL = "SIFF官方精选 / 竞赛片"
+CONTENT_AUTEUR = "名导作品"
+CONTENT_EMERGING = "新锐作品"
+CONTENT_BIG_SCREEN = "大银幕视听"
+CONTENT_NONFICTION = "非虚构"
+CONTENT_ANIMATION_SHORT_SPECIAL = "动画 / 短片 / 特别放映"
+CONTENT_WORLD = "世界电影 / 多元探索"
+
+FALLBACK_CONTENT_ORDER = [
+    CONTENT_SIFF_OFFICIAL,
+    CONTENT_AUTEUR,
+    CONTENT_EMERGING,
+    CONTENT_WORLD,
+    CONTENT_NONFICTION,
+    CONTENT_BIG_SCREEN,
+    CONTENT_ANIMATION_SHORT_SPECIAL,
+]
+
 CHINESE_REGIONS = {"中国", "中国大陆", "中国内地", "中国香港", "中国台湾", "新加坡", "马来西亚"}
 EUROPE_REGIONS = {
     "阿尔巴尼亚",
@@ -46,15 +64,14 @@ EUROPE_REGIONS = {
     "瑞士",
     "乌克兰",
 }
-PREMIUM_FORMAT_KEYWORDS = {"4K", "IMAX", "CINITY", "DOLBY VISION", "ONYX", "LUXE", "XR"}
-PREMIUM_HALL_KEYWORDS = {"4K", "IMAX", "CINITY", "杜比", "巨幕", "激光", "ONYX", "LUXE"}
+DISPLAY_FORMAT_KEYWORDS = ["IMAX", "4K", "CINITY", "杜比", "XR", "ONYX", "LUXE"]
 NORMALIZE_REMOVE_CHARS = str.maketrans("", "", "· .-/")
 
 
 @dataclass(frozen=True)
 class InterestProfile:
     region_preferences: list[str]
-    prefer_premium_format: bool
+    content_preferences: list[str]
     exclusions: list[str]
     creators: list[str]
     works: list[str]
@@ -68,9 +85,11 @@ class FilmRecommendation:
     duration: int | None
     score: int
     reasons: list[str]
+    candidate_basis: list[str]
     screenings: list[Screening]
+    content_matches: list[str]
     has_creator_or_work_match: bool
-    has_premium_format_match: bool
+    is_fallback: bool
 
 
 def filter_excluded_screenings(screenings: list[Screening], profile: InterestProfile) -> list[Screening]:
@@ -88,18 +107,20 @@ def recommend_screenings(
         score_film(film_screenings, profile)
         for film_screenings in _group_screenings_by_film(screenings).values()
     ]
+    positive_recommendations = [item for item in recommendations if item.score > 0]
 
-    return sorted(
-        recommendations,
-        key=lambda item: (
-            -item.score,
-            not item.has_creator_or_work_match,
-            not item.has_premium_format_match,
-            -len(item.screenings),
-            item.screenings[0].show_date,
-            item.screenings[0].start_time,
-            item.title,
-        ),
+    if len(positive_recommendations) >= 5:
+        return _sort_positive_recommendations(positive_recommendations)[:limit]
+
+    positive_keys = {_recommendation_key(item) for item in positive_recommendations}
+    fallback_recommendations = [
+        _as_fallback_recommendation(item)
+        for item in recommendations
+        if _recommendation_key(item) not in positive_keys and item.content_matches
+    ]
+    return (
+        _sort_positive_recommendations(positive_recommendations)
+        + _sort_fallback_recommendations(fallback_recommendations)
     )[:limit]
 
 
@@ -121,19 +142,17 @@ def score_film(screenings: list[Screening], profile: InterestProfile) -> FilmRec
         reasons.extend(work_reasons)
         has_creator_or_work_match = True
 
+    content_matches = _content_matches_for_film(screenings)
+    selected_content_matches = _selected_content_matches(content_matches, profile.content_preferences)
+    if selected_content_matches:
+        scored_content_matches = selected_content_matches[:2]
+        score += 3 * len(scored_content_matches)
+        reasons.append(f"命中内容偏好：{', '.join(scored_content_matches)}")
+
     region_hits = _matched_region_preferences(screenings, profile.region_preferences)
     if region_hits:
         score += 2
-        reasons.append(f"命中国家/地区偏好：{', '.join(region_hits)}")
-
-    has_premium_format_match = profile.prefer_premium_format and any(
-        _is_premium_screening(screening) for screening in screenings
-    )
-    if has_premium_format_match:
-        score += 1
-        reasons.append("命中影院设施偏好：存在视听效果更佳的可观看场次")
-
-    reasons.append(f"存在 {len(screenings)} 个可观看场次")
+        reasons.append(f"命中国家 / 地区偏好：{', '.join(region_hits)}")
 
     return FilmRecommendation(
         title=representative.display_name,
@@ -141,11 +160,100 @@ def score_film(screenings: list[Screening], profile: InterestProfile) -> FilmRec
         country_or_region=representative.country,
         duration=representative.length_min,
         score=score,
-        reasons=_unique_values(reasons),
+        reasons=_limit_reasons(reasons),
+        candidate_basis=_candidate_basis(content_matches, screenings),
         screenings=screenings,
+        content_matches=content_matches,
         has_creator_or_work_match=has_creator_or_work_match,
-        has_premium_format_match=has_premium_format_match,
+        is_fallback=False,
     )
+
+
+def screening_format_label(screening: Screening) -> str:
+    text = " ".join([screening.format_flags, screening.hall]).upper()
+    labels: list[str] = []
+
+    for keyword in DISPLAY_FORMAT_KEYWORDS:
+        normalized_keyword = keyword.upper()
+        if normalized_keyword in text or (keyword == "4K" and screening.is_4k):
+            labels.append(keyword)
+
+    return " / ".join(_unique_values(labels))
+
+
+def _sort_positive_recommendations(recommendations: list[FilmRecommendation]) -> list[FilmRecommendation]:
+    return sorted(
+        recommendations,
+        key=lambda item: (
+            -item.score,
+            not item.has_creator_or_work_match,
+            -len(item.content_matches),
+            item.screenings[0].show_date,
+            item.screenings[0].start_time,
+            -len(item.screenings),
+            item.title,
+        ),
+    )
+
+
+def _sort_fallback_recommendations(recommendations: list[FilmRecommendation]) -> list[FilmRecommendation]:
+    return sorted(
+        recommendations,
+        key=lambda item: (
+            _fallback_rank(item),
+            item.screenings[0].show_date,
+            item.screenings[0].start_time,
+            item.title,
+        ),
+    )
+
+
+def _as_fallback_recommendation(recommendation: FilmRecommendation) -> FilmRecommendation:
+    return FilmRecommendation(
+        title=recommendation.title,
+        director=recommendation.director,
+        country_or_region=recommendation.country_or_region,
+        duration=recommendation.duration,
+        score=0,
+        reasons=[],
+        candidate_basis=_candidate_basis(recommendation.content_matches, recommendation.screenings),
+        screenings=recommendation.screenings,
+        content_matches=recommendation.content_matches,
+        has_creator_or_work_match=False,
+        is_fallback=True,
+    )
+
+
+def _fallback_rank(recommendation: FilmRecommendation) -> int:
+    ranks = [
+        FALLBACK_CONTENT_ORDER.index(content)
+        for content in recommendation.content_matches
+        if content in FALLBACK_CONTENT_ORDER
+    ]
+    return min(ranks) if ranks else len(FALLBACK_CONTENT_ORDER)
+
+
+def _recommendation_key(recommendation: FilmRecommendation) -> tuple[str, str]:
+    first_screening = recommendation.screenings[0]
+    return (first_screening.film_id or recommendation.title, recommendation.director)
+
+
+def _candidate_basis(content_matches: list[str], screenings: list[Screening]) -> list[str]:
+    basis: list[str] = []
+    fallback_content = next((content for content in FALLBACK_CONTENT_ORDER if content in content_matches), None)
+    if fallback_content:
+        basis.append(f"属于 {fallback_content}")
+    first_screening = screenings[0]
+    basis.append(
+        "最早可观看场次："
+        f"{first_screening.show_date.month}月{first_screening.show_date.day}日 "
+        f"{first_screening.start_time.strftime('%H:%M')}"
+    )
+    return basis
+
+
+def _limit_reasons(reasons: list[str]) -> list[str]:
+    return _unique_values(reasons)[:3]
 
 
 def _score_creators(screenings: list[Screening], creators: list[str]) -> tuple[int, list[str]]:
@@ -282,14 +390,92 @@ def _matched_region_preferences(screenings: list[Screening], preferences: list[s
     return _unique_values(hits)
 
 
-def _is_premium_screening(screening: Screening) -> bool:
-    format_text = screening.format_flags.upper()
-    hall_text = screening.hall.upper()
-    return (
-        screening.is_4k
-        or any(keyword in format_text for keyword in PREMIUM_FORMAT_KEYWORDS)
-        or any(keyword.upper() in hall_text for keyword in PREMIUM_HALL_KEYWORDS)
-    )
+def _selected_content_matches(content_matches: list[str], preferences: list[str]) -> list[str]:
+    if "不限" in preferences:
+        return []
+    return [content for content in content_matches if content in preferences]
+
+
+def _content_matches_for_film(screenings: list[Screening]) -> list[str]:
+    matches: list[str] = []
+    for screening in screenings:
+        matches.extend(_content_matches_for_screening(screening))
+    return _unique_values(matches)
+
+
+def _content_matches_for_screening(screening: Screening) -> list[str]:
+    group = screening.group
+    text = " ".join([screening.group, screening.format_flags, screening.hall])
+    matches: list[str] = []
+
+    if (
+        group.startswith("金爵奖参赛片-")
+        or group.startswith("官方推荐-")
+        or "开闭幕片" in group
+        or "特别放映" in group
+    ):
+        matches.append(CONTENT_SIFF_OFFICIAL)
+
+    if (
+        group.startswith("向大师致敬")
+        or group.startswith("SIFF经典")
+        or "官方推荐-名导新作" in group
+        or "官方推荐-评委主席及作品展" in group
+        or "官方推荐-评委主席及评委作品展" in group
+    ):
+        matches.append(CONTENT_AUTEUR)
+
+    if (
+        "官方推荐-世界首作" in group
+        or "官方推荐-名导新作" in group
+        or "金爵奖参赛片-亚洲新人奖" in group
+        or "华语新风" in group
+        or "今日亚洲-年度亚洲电影" in group
+        or "香港电影新动力" in group
+    ):
+        matches.append(CONTENT_EMERGING)
+
+    if (
+        "新视野-IMAX" in group
+        or "新视野-杜比视界" in group
+        or group.startswith("科幻电影周")
+        or "午夜惊奇" in group
+        or "4K修复" in group
+        or "魔法" in group
+        or "置身扩影" in group
+        or any(keyword in text.upper() for keyword in ["IMAX", "CINITY", "XR"])
+        or "杜比" in text
+    ):
+        matches.append(CONTENT_BIG_SCREEN)
+
+    if "SIFF纪录" in group or "金爵奖参赛片-纪录片" in group or "宝格丽真实之境" in group:
+        matches.append(CONTENT_NONFICTION)
+
+    if (
+        "SIFF动画" in group
+        or "SIFF短片" in group
+        or "金爵奖参赛片-动画片" in group
+        or "金爵奖参赛片-短片" in group
+        or "动画片" in group
+        or "短片片" in group
+        or "特别放映" in group
+        or "置身扩影" in group
+        or "XR" in text.upper()
+        or "科幻电影周-阿内·拉鲁科幻动画三部曲" in group
+    ):
+        matches.append(CONTENT_ANIMATION_SHORT_SPECIAL)
+
+    if (
+        "一带一路" in group
+        or "世界万象" in group
+        or "多元视角" in group
+        or "今日亚洲" in group
+        or "大好河山·中华电影图卷" in group
+        or "宝格丽真实之境" in group
+    ):
+        matches.append(CONTENT_WORLD)
+
+    return _unique_values(matches)
 
 
 def _screening_text(screening: Screening) -> str:

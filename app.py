@@ -10,6 +10,7 @@ from siff_picker.recommender import (
     InterestProfile,
     filter_excluded_screenings,
     recommend_screenings,
+    screening_format_label,
 )
 
 
@@ -30,9 +31,15 @@ REGION_OPTIONS = {
     "5": "其他欧洲",
     "6": "不限",
 }
-PREMIUM_OPTIONS = {
-    "1": True,
-    "2": False,
+CONTENT_OPTIONS = {
+    "1": "SIFF官方精选 / 竞赛片",
+    "2": "名导作品",
+    "3": "新锐作品",
+    "4": "大银幕视听",
+    "5": "非虚构",
+    "6": "动画 / 短片 / 特别放映",
+    "7": "世界电影 / 多元探索",
+    "8": "不限",
 }
 EXCLUSION_OPTIONS = {
     "1": "恐怖 / 惊悚片",
@@ -61,13 +68,13 @@ def main() -> None:
 
     selected_slots, skip_time_filter = prompt_time_slots()
     region_preferences = prompt_region_preferences()
-    prefer_premium_format = prompt_premium_preference()
+    content_preferences = prompt_content_preferences()
     exclusions = prompt_exclusions()
     creators, works = prompt_supplemental_preferences()
 
     profile = InterestProfile(
         region_preferences=region_preferences,
-        prefer_premium_format=prefer_premium_format,
+        content_preferences=content_preferences,
         exclusions=exclusions,
         creators=creators,
         works=works,
@@ -117,18 +124,24 @@ def prompt_region_preferences() -> list[str]:
         print("输入没有识别成功，请输入 1 到 6，或类似 1,3 的组合。")
 
 
-def prompt_premium_preference() -> bool:
+def prompt_content_preferences() -> list[str]:
     while True:
         print()
-        print("三、影院设施，单选：")
-        print("1 优先视听效果更佳的场次（如 4K、IMAX、CINITY 等）")
-        print("2 不限")
+        print("三、内容偏好，多选（可用英文逗号分隔）：")
+        print("1 SIFF官方精选 / 竞赛片")
+        print("2 名导作品")
+        print("3 新锐作品")
+        print("4 大银幕视听")
+        print("5 非虚构")
+        print("6 动画 / 短片 / 特别放映")
+        print("7 世界电影 / 多元探索")
+        print("8 不限")
 
-        choice = input("> ").strip()
-        if choice in PREMIUM_OPTIONS:
-            return PREMIUM_OPTIONS[choice]
+        selected = parse_multi_choice(input("> ").strip(), CONTENT_OPTIONS)
+        if selected:
+            return ["不限"] if "不限" in selected else selected
 
-        print("输入没有识别成功，请输入 1 或 2。")
+        print("输入没有识别成功，请输入 1 到 8，或类似 1,4 的组合。")
 
 
 def prompt_exclusions() -> list[str]:
@@ -231,10 +244,15 @@ def print_recommendations(
         print(f"   导演: {director}")
         print(f"   国家/地区: {country}")
         print(f"   时长: {duration}")
-        print(f"   推荐分数: {recommendation.score}")
-        print("   推荐理由:")
-        for reason in recommendation.reasons:
-            print(f"   - {reason}")
+        if recommendation.is_fallback:
+            print("   候选依据:")
+            for basis in recommendation.candidate_basis:
+                print(f"   - {basis}")
+        else:
+            print(f"   推荐分数: {recommendation.score}")
+            print("   推荐理由:")
+            for reason in recommendation.reasons:
+                print(f"   - {reason}")
         print("   可观看场次:")
         for screening in recommendation.screenings:
             show_time = (
@@ -242,7 +260,9 @@ def print_recommendations(
                 f"{screening.start_time.strftime('%H:%M')}-{screening.end_time.strftime('%H:%M')}"
             )
             cinema = f"{screening.cinema} {screening.hall}".strip()
-            print(f"   - {show_time} | {cinema}")
+            format_label = screening_format_label(screening)
+            suffix = f" | {format_label}" if format_label else ""
+            print(f"   - {show_time} | {cinema}{suffix}")
         print()
 
 
