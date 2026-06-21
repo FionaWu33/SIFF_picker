@@ -24,6 +24,7 @@ def make_screening(
     film_id: str = "film-1",
     title: str = "测试影片",
     show_date: date = date(2026, 6, 20),
+    weekday: str = "周六",
     start: time = time(18, 30),
     end: time = time(20, 0),
     length_min: int = 90,
@@ -42,7 +43,7 @@ def make_screening(
         name_cn_base=title,
         name_en="TEST FILM",
         show_date=show_date,
-        weekday="周六",
+        weekday=weekday,
         start_time=start,
         end_time=end,
         length_min=length_min,
@@ -255,4 +256,3 @@ def test_screening_format_label_is_display_only_and_does_not_score():
 
     assert recommendation.score == 0
     assert recommendation.reasons == []
-
