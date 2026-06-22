@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from app import filter_by_time_slots, get_current_beijing_time, parse_keyword_list
-from siff_picker.filters import TimeSlot, count_unique_films, filter_future_screenings
+from siff_picker.filters import TimeSlot, filter_future_screenings
 from siff_picker.loader import load_screenings
 from siff_picker.models import Screening
 from siff_picker.recommender import (
@@ -23,6 +23,8 @@ DATA_PATH = Path(__file__).parent / "data" / "siff2026.csv"
 DEMO_MODE = "演示模式"
 REAL_MODE = "真实模式"
 DEMO_NOW = datetime(2026, 6, 15, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+RESULTS_PAGE_SIZE = 10
+SCREENINGS_PREVIEW_SIZE = 3
 
 TIME_LABEL_TO_SLOT = {
     "工作日白天": TimeSlot.WEEKDAY_DAY,
@@ -61,11 +63,16 @@ def load_all_screenings() -> list[Screening]:
 def main() -> None:
     st.set_page_config(page_title="SIFF Picker", page_icon="🎬", layout="centered")
     st.title("SIFF Picker")
-    st.caption("从 SIFF 海量片单中缩小选择范围，生成电影候选片单。")
+    st.caption("在有限的时间和精力约束下，帮你从 SIFF 海量片单中找到可能感兴趣的电影。")
+    st.caption(
+        "• 基于 SIFF 官方片单与放映数据  \n"
+        "• 结合可用时间、内容偏好和排除项生成候选片单  \n"
+        "• 提供推荐理由与候选依据，保留用户最终判断"
+    )
 
     with st.container(border=True):
         st.subheader("筛选条件")
-        st.caption("如果某一组不选择任何选项，系统会按“不限”处理。")
+        st.caption("未选择的条件默认按“不限”处理。")
 
         run_mode = st.radio(
             "运行模式",
@@ -74,9 +81,9 @@ def main() -> None:
             horizontal=True,
         )
         if run_mode == DEMO_MODE:
-            st.caption("演示模式：使用固定时间 2026-06-15 12:00，仅用于体验产品逻辑")
+            st.caption("演示模式：使用固定时间 2026-06-15 12:00，仅用于体验产品逻辑。")
         else:
-            st.caption("真实模式：使用当前北京时间过滤已开始场次")
+            st.caption("真实模式：使用当前北京时间过滤已开始场次。")
         st.divider()
 
         selected_time_labels = _checkbox_group(
@@ -128,7 +135,7 @@ def main() -> None:
 
     if submitted:
         now_override = DEMO_NOW if run_mode == DEMO_MODE else None
-        st.session_state["last_result"] = _generate_recommendations(
+        result = _generate_recommendations(
             selected_time_labels,
             selected_regions,
             selected_contents,
@@ -138,21 +145,21 @@ def main() -> None:
             now_override=now_override,
             run_mode=run_mode,
         )
+        result["has_content_preferences"] = _has_content_preferences(
+            selected_regions,
+            selected_contents,
+            creators_text,
+            works_text,
+        )
+        st.session_state["last_result"] = result
+        st.session_state["visible_recommendation_count"] = RESULTS_PAGE_SIZE
 
     if "last_result" not in st.session_state:
         st.info("完成选择后，点击“生成候选片单”查看结果。")
         return
 
     result = st.session_state["last_result"]
-    _render_summary(
-        result["screenings"],
-        result["future_screenings"],
-        result["time_filtered_screenings"],
-        result["eligible_screenings"],
-        result["now"],
-        result["run_mode"],
-    )
-    _render_results(result["recommendations"])
+    _render_results(result["recommendations"], result.get("has_content_preferences", False))
 
 
 def _generate_recommendations(
@@ -207,6 +214,20 @@ def _normalize_unlimited_selection(values: list, unlimited_value: str) -> list:
     return [unlimited_value]
 
 
+def _has_content_preferences(
+    selected_regions: list[str],
+    selected_contents: list[str],
+    creators_text: str,
+    works_text: str,
+) -> bool:
+    return bool(
+        [region for region in selected_regions if region != "不限"]
+        or [content for content in selected_contents if content != "不限"]
+        or parse_keyword_list(creators_text)
+        or parse_keyword_list(works_text)
+    )
+
+
 def _checkbox_group(
     label: str,
     options: list[str],
@@ -248,64 +269,101 @@ def _sync_exclusive_checkbox_group(changed_key: str, keys: list[str], exclusive_
     st.session_state[exclusive_key] = False
 
 
-def _render_summary(
-    screenings: list[Screening],
-    future_screenings: list[Screening],
-    time_filtered_screenings: list[Screening],
-    eligible_screenings: list[Screening],
-    now: datetime,
-    run_mode: str,
-) -> None:
-    st.subheader("筛选概览")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("总电影数", count_unique_films(screenings))
-    col2.metric("原始场次数", len(screenings))
-    col3.metric("未开始场次", len(future_screenings))
-    col4.metric("进入推荐场次", len(eligible_screenings))
-    if run_mode == DEMO_MODE:
-        time_label = f"当前使用时间：{now.strftime('%Y-%m-%d %H:%M %Z')}（演示模式）"
+def _render_results(recommendations: list[FilmRecommendation], has_content_preferences: bool) -> None:
+    has_fallback_recommendations = any(recommendation.is_fallback for recommendation in recommendations)
+    display_recommendations = recommendations[:20] if has_fallback_recommendations else recommendations
+    total_count = len(display_recommendations)
+
+    st.subheader(f"推荐片单（共 {total_count} 部）")
+    if has_content_preferences:
+        st.caption("根据你的筛选条件，为你生成以下片单。")
     else:
-        time_label = f"当前北京时间：{now.strftime('%Y-%m-%d %H:%M %Z')}（真实模式）"
-    st.caption(f"{time_label} ｜ 可用时间筛选后 {len(time_filtered_screenings)} 场")
+        st.caption("以下按官方内容优先级与可观看时间排序。")
 
-
-def _render_results(recommendations: list[FilmRecommendation]) -> None:
-    positive_recommendations = [recommendation for recommendation in recommendations if not recommendation.is_fallback]
-    fallback_recommendations = [recommendation for recommendation in recommendations if recommendation.is_fallback]
-
-    if positive_recommendations:
-        st.subheader("命中偏好的电影")
-        for recommendation in positive_recommendations:
-            _render_recommendation_card(recommendation)
-
-    if fallback_recommendations:
-        st.subheader("兜底候选电影")
-        for recommendation in fallback_recommendations:
-            _render_recommendation_card(recommendation)
-
-    if not recommendations:
+    if not display_recommendations:
         st.warning("没有找到符合条件的电影。")
+        return
+
+    visible_count = min(
+        st.session_state.get("visible_recommendation_count", RESULTS_PAGE_SIZE),
+        total_count,
+    )
+    for recommendation in display_recommendations[:visible_count]:
+        _render_recommendation_card(recommendation)
+
+    if visible_count < total_count:
+        st.button(
+            "查看更多",
+            key="show_more_recommendations",
+            on_click=_show_more_recommendations,
+            args=(total_count,),
+        )
+    else:
+        st.caption("已展示全部推荐片单")
+
+
+def _show_more_recommendations(total_count: int) -> None:
+    current_count = st.session_state.get("visible_recommendation_count", RESULTS_PAGE_SIZE)
+    st.session_state["visible_recommendation_count"] = min(
+        current_count + RESULTS_PAGE_SIZE,
+        total_count,
+    )
 
 
 def _render_recommendation_card(recommendation: FilmRecommendation) -> None:
     with st.container(border=True):
-        st.markdown(f"### {recommendation.title}")
-        st.write(f"导演：{recommendation.director or '导演信息暂无'}")
-        st.write(f"国家/地区：{recommendation.country_or_region or '国家/地区信息暂无'}")
-        st.write(f"时长：{recommendation.duration}分钟" if recommendation.duration is not None else "时长：暂无")
+        st.markdown(f"#### 《{recommendation.title}》")
+        metadata = [
+            f"导演：{recommendation.director or '暂无'}",
+            f"国家 / 地区：{recommendation.country_or_region or '暂无'}",
+            f"时长：{recommendation.duration}分钟" if recommendation.duration is not None else "时长：暂无",
+        ]
+        official_group = _official_group(recommendation)
+        if official_group:
+            metadata.append(f"官方单元：{official_group}")
+        st.caption(" ｜ ".join(metadata))
 
         if recommendation.is_fallback:
             st.markdown("**候选依据**")
-            for basis in recommendation.candidate_basis:
-                st.markdown(f"- {basis}")
+            _render_reason_tags(recommendation.candidate_basis)
         else:
             st.markdown("**推荐理由**")
-            for reason in recommendation.reasons:
-                st.markdown(f"- {reason}")
+            _render_reason_tags(recommendation.reasons)
 
         st.markdown("**可观看场次**")
-        for screening in recommendation.screenings:
+        preview_screenings = recommendation.screenings[:SCREENINGS_PREVIEW_SIZE]
+        remaining_screenings = recommendation.screenings[SCREENINGS_PREVIEW_SIZE:]
+        for screening in preview_screenings:
             st.markdown(f"- {_format_screening(screening)}")
+
+        if remaining_screenings:
+            with st.expander(f"查看更多场次（{len(remaining_screenings)}）"):
+                for screening in remaining_screenings:
+                    st.markdown(f"- {_format_screening(screening)}")
+
+
+def _official_group(recommendation: FilmRecommendation) -> str:
+    return next((screening.group.strip() for screening in recommendation.screenings if screening.group.strip()), "")
+
+
+def _render_reason_tags(reasons: list[str]) -> None:
+    tags: list[str] = []
+    for reason in reasons:
+        if reason.startswith("命中内容偏好："):
+            tags.extend(part.strip() for part in reason.removeprefix("命中内容偏好：").split(",") if part.strip())
+        elif reason.startswith("命中国家 / 地区偏好："):
+            tags.append(f"地区：{reason.removeprefix('命中国家 / 地区偏好：')}")
+        elif reason.startswith("命中创作者偏好："):
+            tags.append(f"创作者：{reason.removeprefix('命中创作者偏好：')}")
+        elif reason.startswith("命中作品偏好："):
+            tags.append(f"作品：{reason.removeprefix('命中作品偏好：')}")
+        elif reason.startswith("属于 "):
+            tags.append(reason.removeprefix("属于 "))
+        else:
+            tags.append(reason)
+
+    unique_tags = list(dict.fromkeys(tag for tag in tags if tag))
+    st.markdown(" ".join(f"`{tag}`" for tag in unique_tags))
 
 
 def _format_screening(screening: Screening) -> str:
@@ -314,10 +372,17 @@ def _format_screening(screening: Screening) -> str:
         f"{screening.start_time.strftime('%H:%M')}-{screening.end_time.strftime('%H:%M')}"
     )
     cinema = f"{screening.cinema} {screening.hall}".strip()
-    format_label = screening_format_label(screening)
+    format_label = _clean_format_label(screening_format_label(screening))
     if format_label:
         return f"{show_time}｜{cinema}｜{format_label}"
     return f"{show_time}｜{cinema}"
+
+
+def _clean_format_label(format_label: str) -> str:
+    labels = [label.strip() for label in format_label.split("/") if label.strip()]
+    unique_labels = list(dict.fromkeys(label.upper() for label in labels))
+    display_labels = ["杜比" if label == "杜比".upper() else label for label in unique_labels]
+    return " / ".join(display_labels)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -15,6 +18,7 @@ from siff_picker.recommender import (
 
 
 DATA_PATH = Path(__file__).parent / "data" / "siff2026.csv"
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 TIME_SLOT_OPTIONS = {
     "1": TimeSlot.WEEKDAY_DAY,
@@ -54,7 +58,7 @@ EXCLUSION_OPTIONS = {
 
 def main() -> None:
     screenings = load_screenings(DATA_PATH)
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    now = get_current_beijing_time()
     future_screenings = filter_future_screenings(screenings, now)
 
     print("欢迎使用 SIFF Picker")
@@ -84,6 +88,14 @@ def main() -> None:
     eligible_screenings = filter_excluded_screenings(time_filtered_screenings, profile)
     recommendations = recommend_screenings(eligible_screenings, profile)
     print_recommendations(recommendations, time_filtered_screenings, eligible_screenings)
+
+
+def get_current_beijing_time(now_override: datetime | None = None) -> datetime:
+    if now_override is None:
+        return datetime.now(SHANGHAI_TZ)
+    if now_override.tzinfo is None:
+        return now_override.replace(tzinfo=SHANGHAI_TZ)
+    return now_override.astimezone(SHANGHAI_TZ)
 
 
 def prompt_time_slots() -> tuple[list[TimeSlot], bool]:
@@ -174,6 +186,7 @@ def prompt_supplemental_preferences() -> tuple[list[str], list[str]]:
 def parse_multi_choice(raw_input: str, options: dict[str, object]) -> list:
     selected: list = []
     seen: set[object] = set()
+    exclusive_values = {"不限", "全天不限"}
 
     for part in raw_input.split(","):
         key = part.strip()
@@ -184,6 +197,10 @@ def parse_multi_choice(raw_input: str, options: dict[str, object]) -> list:
             selected.append(value)
             seen.add(value)
 
+    concrete_selected = [value for value in selected if value not in exclusive_values]
+    if concrete_selected:
+        return concrete_selected
+
     return selected
 
 
@@ -191,7 +208,7 @@ def parse_keyword_list(raw_input: str) -> list[str]:
     keywords: list[str] = []
     seen: set[str] = set()
 
-    for part in raw_input.split(","):
+    for part in re.split(r"[、，,；;\s]+", raw_input):
         keyword = part.strip()
         normalized = keyword.casefold()
         if keyword and normalized not in seen:
