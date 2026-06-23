@@ -1,7 +1,17 @@
 # SIFF Picker
 
+## 在线 Demo
 
-- 在线 Demo：https://siff2026-picker.streamlit.app
+https://siff2026-picker.streamlit.app
+
+## Demo Preview
+
+![SIFF Picker 首页](docs/images/home.png)
+
+![首页](docs/images/filters.png)
+
+![推荐片单结果](docs/images/results.png)
+
 
 SIFF Picker 帮助用户在电影节有限的时间和精力约束下，从 SIFF 海量片单中找到可能感兴趣的电影，并生成可进一步了解和购票的推荐片单。
 
